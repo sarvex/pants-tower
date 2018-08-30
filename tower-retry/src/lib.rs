@@ -6,18 +6,21 @@ extern crate tower_service;
 use futures::{Async, Future, Poll};
 use tower_service::Service;
 
+use std::marker::PhantomData;
+
 pub mod budget;
 
-#[derive(Clone, Debug)]
-pub struct Retry<P, S> {
+#[derive(Debug)]
+pub struct Retry<P, S, R> {
     policy: P,
     service: S,
+    _req: PhantomData<fn() -> R>,
 }
 
 #[derive(Debug)]
-pub struct ResponseFuture<P: Policy<S::Request, S::Response, S::Error>, S: Service> {
-    request: Option<S::Request>,
-    retry: Retry<P, S>,
+pub struct ResponseFuture<P: Policy<R, S::Response, S::Error>, S: Service<R>, R> {
+    request: Option<R>,
+    retry: Retry<P, S, R>,
     state: State<S::Future, P::Future, S::Response, S::Error>,
 }
 
@@ -40,34 +43,34 @@ pub trait Policy<Req, Res, E>: Sized {
 
 // ===== impl Retry =====
 
-impl<P, S> Retry<P, S>
+impl<P, S, R> Retry<P, S, R>
 where
-    P: Policy<S::Request, S::Response, S::Error> + Clone,
-    S: Service + Clone,
+    P: Policy<R, S::Response, S::Error> + Clone,
+    S: Service<R> + Clone,
 {
     pub fn new(policy: P, service: S) -> Self {
         Retry {
             policy,
             service,
+            _req: PhantomData,
         }
     }
 }
 
-impl<P, S> Service for Retry<P, S>
+impl<P, S, R> Service<R> for Retry<P, S, R>
 where
-    P: Policy<S::Request, S::Response, S::Error> + Clone,
-    S: Service + Clone,
+    P: Policy<R, S::Response, S::Error> + Clone,
+    S: Service<R> + Clone,
 {
-    type Request = S::Request;
     type Response = S::Response;
     type Error = S::Error;
-    type Future = ResponseFuture<P, S>;
+    type Future = ResponseFuture<P, S, R>;
 
     fn poll_ready(&mut self) -> Poll<(), Self::Error> {
         self.service.poll_ready()
     }
 
-    fn call(&mut self, request: Self::Request) -> Self::Future {
+    fn call(&mut self, request: R) -> Self::Future {
         let cloned = self.policy.clone_request(&request);
         let future = self.service.call(request);
         ResponseFuture {
@@ -78,12 +81,28 @@ where
     }
 }
 
+// Manual impl of Clone for Retry since the Request type need not be clone.
+
+impl<P, S, R> Clone for Retry<P, S, R>
+where
+    P: Policy<R, S::Response, S::Error> + Clone,
+    S: Service<R> + Clone,
+{
+    fn clone(&self) -> Self {
+        Self {
+            policy: self.policy.clone(),
+            service: self.service.clone(),
+            _req: PhantomData,
+        }
+    }
+}
+
 // ===== impl ResponseFuture =====
 
-impl<P, S> Future for ResponseFuture<P, S>
+impl<P, S, R> Future for ResponseFuture<P, S, R>
 where
-    P: Policy<S::Request, S::Response, S::Error> + Clone,
-    S: Service + Clone,
+    P: Policy<R, S::Response, S::Error> + Clone,
+    S: Service<R> + Clone,
 {
     type Item = S::Response;
     type Error = S::Error;
